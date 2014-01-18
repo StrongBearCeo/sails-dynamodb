@@ -3,7 +3,7 @@
     "version": "0.0.1",
     "description": "Personal adapter for dynamodb",
     "main": "index.js",
-    "author": "Dane Stuckel"
+    "author": "Dane Stuckel",
     "dependencies": {
         "aws-sdk": "~2.0.0-rc8",
         "underscore": "~1.5.2"
