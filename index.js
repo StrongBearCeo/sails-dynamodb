@@ -3,8 +3,10 @@ var AWS = require('aws-sdk'),
 
 module.exports = (function() {
 
-    var _modelReferences = {};
+    var collections = {};
     var _dbPools = {};
+
+    var dynamodb = new AWS.DynamoDB();
 
     //Tell me what environment variables exists
     console.log("AWS environment variables available:")
@@ -17,6 +19,7 @@ module.exports = (function() {
     //For some reason, AWS is not detecting my env variables.
     AWS.config.update({accessKeyId:process.env.AWS_ACCESS_KEY, secretAccessKey:process.env.AWS_SECRET_ACCESS_KEY});
     AWS.config.update({region:process.env.AWS_REGION});
+
 
     /**
      * @param {[]} awsObjs
@@ -73,13 +76,21 @@ module.exports = (function() {
             WriteCapacityUnits: 10
         },
 
+        setDynamoDb: function (mock) {
+            dynamodb = mock;
+        },
+
+        setCollections: function (mock) {
+            collections = mock;
+        },
+
         /**
          * Save a collection (table) locally so we can save information about it
          * @param  {{identity:string}} collection
          * @param  {Function} cb callback
          */
         registerCollection: function (collection, cb) {
-            _modelReferences[collection.identity] = collection;
+            collections[collection.identity] = collection;
             cb();
         },
 
@@ -107,7 +118,7 @@ module.exports = (function() {
             console.log("define", collectionName, definition, cb);
             //create a new table with the definition
 
-            _modelReferences[collectionName].definition = definition;
+            collections[collectionName].definition = definition;
 
             function getType (type) {
                 switch(type) {
@@ -147,12 +158,11 @@ module.exports = (function() {
             params.KeySchema.push({
                 AttributeName: "createdAt",
                 KeyType: "RANGE"
-            })
+            });
 
             console.log("params", params);
-            var dynamodb = new AWS.DynamoDB();
             dynamodb.createTable(params, function (err, data) {
-                _modelReferences[collectionName].creation = data;
+                collections[collectionName].creation = data;
                 console.log("define", err, data);
                 cb(err, data);
             });
@@ -168,7 +178,7 @@ module.exports = (function() {
          */
         describe: function (collectionName, cb) {
             console.log("describe", collectionName, cb);
-            var attributes = _modelReferences[collectionName];
+            var attributes = collections[collectionName];
 
             //We should ask if the table exists
 
@@ -176,14 +186,13 @@ module.exports = (function() {
                 TableName: collectionName
             };
 
-            var dynamodb = new AWS.DynamoDB();
             dynamodb.describeTable(params, function (err, data) {
                 if (err && err.code === "ResourceNotFoundException") {
                     //ignore this error, since we're just checking if it exists
                     err = null;
                 }
                 if (data) {
-                    _modelReferences[collectionName].serverDescription = data;
+                    collections[collectionName].serverDescription = data;
                 }
                 console.log("describe results", err, data);
                 cb(err, data);
@@ -224,12 +233,13 @@ module.exports = (function() {
          * @param  {Function} cb
          */
         find: function (collectionName, options, cb) {
-            console.log("find", collectionName, options, cb);
-
             var params = {
                     TableName: collectionName
                 },
-                collection = _modelReferences[collectionName];
+                collection = collections[collectionName];
+
+            if (!collection) { cb(new Error("Missing collection")) }
+            if (!collection.definition) { cb(new Error("Missing collection.definition")) }
 
             // Options object is normalized for you:
             //
@@ -245,7 +255,6 @@ module.exports = (function() {
             if (options.limit === 1 && options.where.id) {
                 params.Key = {"id": {"N": options.where.id}};
 
-                var dynamodb = new AWS.DynamoDB();
                 dynamodb.getItem(params, function (err, data) {
                     var item = data && data.Item &&
                         condenseItem(data.Item, collection.definition);
@@ -256,19 +265,15 @@ module.exports = (function() {
 
 
                 if (options.where) {
-                    params.IndexName = Object.keys(options.where)[0];
-                } else {
-                    params.Select = "ALL_ATTRIBUTES"
+                    params.IndexName = options.where.id;
                 }
 
                 if (options.limit) {
                     params.Limit = options.limit;
                 }
 
-                dynamodb = new AWS.DynamoDB();
                 dynamodb.scan(params, function (err, data) {
                     var items = data && condenseItems(data.Items, collection.definition);
-                    console.log("scan found", err || data);
                     cb(err, items);
                 });
             }
@@ -284,7 +289,7 @@ module.exports = (function() {
             console.log('create', collectionName, values, cb);
             // Create a single new model (specified by `values`)
             var item = {},
-                collection = _modelReferences[collectionName],
+                collection = collections[collectionName],
                 definition = collection.definition;
 
             item.id = {"N": generateUid().toString()};
@@ -312,8 +317,7 @@ module.exports = (function() {
                     Expected: {
                         id: { Exists: false}
                     }
-                },
-                dynamodb = new AWS.DynamoDB();
+                };
             dynamodb.putItem(params, function (err, data) {
                 if (err && err.code == "ConditionalCheckFailedException") {
                     console.log("Found item with that id already.");
@@ -336,12 +340,11 @@ module.exports = (function() {
          * @param  {[type]}   options        [description]
          * @param  {[type]}   values         [description]
          * @param  {Function} cb             [description]
-         * @return {[type]}                  [description]
          */
         update: function (collectionName, options, values, cb) {
 
             // If you need to access your private data for this collection:
-            var collection = _modelReferences[collectionName];
+            var collection = collections[collectionName];
 
             // 1. Filter, paginate, and sort records from the datastore.
             //    You should end up w/ an array of objects as a result.
@@ -351,7 +354,7 @@ module.exports = (function() {
             //
             // (do both in a single query if you can-- it's faster)
 
-            cb(new Error("Not supported yet.  Will be."););
+            cb(new Error("Not supported yet.  Will be."));
         },
 
         /**
@@ -361,10 +364,9 @@ module.exports = (function() {
          * @param  {[type]}   collectionName [description]
          * @param  {[type]}   options        [description]
          * @param  {Function} cb             [description]
-         * @return {[type]}                  [description]
          */
         destroy: function (collectionName, options, cb) {
-            cb(new Error("Not supported yet.  Will be."););
+            cb(new Error("Not supported yet.  Will be."));
         }
     };
 
