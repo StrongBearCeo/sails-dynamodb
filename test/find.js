@@ -1,27 +1,32 @@
 /*globals describe, it, beforeEach, afterEach */
-var mocha = require('mocha'),
-    sinon = require('sinon'),
+var sinon = require('sinon'),
     adapter = require('../.');
 
 var collectionName = 'collectionName';
 var collection = {
     identity: collectionName,
-    definition: {}
+    definition: {},
+    hashKey: 'uid'
 };
 var collections = {};
 collections[collectionName] = collection;
 
 //fake of dynamodb
 var dynamodb = {
-    scan: function (params, cb) { cb(new Error("Must be stubbed")); }
+    query: function (params, cb) { cb(new Error("Must be stubbed")); },
+    getItem: function (params, cb) { cb(new Error("Must be stubbed")); }
 };
 
-adapter.setDynamoDb(dynamodb);
-adapter.setCollections(collections);
+
 
 describe('find', function () {
     var sandbox,
         collectionName = 'collectionName';
+
+    before(function () {
+        adapter.setDynamoDb(dynamodb);
+        adapter.setCollections(collections);
+    });
 
     beforeEach(function () {
         sandbox = sinon.sandbox.create();
@@ -32,20 +37,24 @@ describe('find', function () {
     });
 
     it('empty options should scan table for everything', function (done) {
-        var options = {},
-            mock = sandbox.mock(dynamodb).expects("scan").once()
+        var options = {};
+
+        sandbox.mock(dynamodb).expects("query").once()
             .withArgs({TableName: collectionName})
             .callsArgWithAsync(1, null, []);
+
         adapter.find(collectionName, options, function (err, data) {
             done(err, data);
         })
     });
 
-    it('options.where.id is set', function (done) {
-        var options = {where: {id: 1}},
-            mock = sandbox.mock(dynamodb).expects("scan").once()
-            .withArgs({ IndexName: 1, TableName: collectionName})
+    it('where hashKey is set', function (done) {
+        var options = {where: {uid: 1}};
+
+        sandbox.mock(dynamodb).expects("getItem").once()
+            .withArgs({Key: { uid: { S: "1" } }, TableName: collectionName})
             .callsArgWithAsync(1, null, []);
+
         adapter.find(collectionName, options, function (err, data) {
             done(err, data);
         })

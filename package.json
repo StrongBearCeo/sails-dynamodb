@@ -1,6 +1,6 @@
 {
   "name": "sails-dynamodb",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Personal adapter for dynamodb",
   "main": "index.js",
   "author": "Dane Stuckel",
@@ -9,6 +9,8 @@
     "underscore": "~1.5.2"
   },
   "devDependencies": {
-    "mocha": "~1.17.1"
+    "mocha": "~1.17.1",
+    "chai": "~1.9.0",
+    "sinon": "~1.7.3"
   }
 }

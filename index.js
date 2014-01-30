@@ -1,12 +1,25 @@
 var AWS = require('aws-sdk'),
     _ = require('underscore');
 
-module.exports = (function() {
+module.exports = (function () {
 
     var collections = {};
     var _dbPools = {};
 
     var dynamodb = new AWS.DynamoDB();
+
+    function getAWSType(type) {
+        switch (type) {
+            case 'integer':
+                return 'N';
+            case 'string':
+                return 'S';
+            case 'datetime':
+                return 'N';
+            default:
+                return 'S';
+        }
+    }
 
     //Tell me what environment variables exists
     console.log("AWS environment variables available:")
@@ -14,12 +27,11 @@ module.exports = (function() {
         if (key.indexOf('AWS') > -1) {
             console.log("\t", key, '\t', item);
         }
-    })
+    });
 
     //For some reason, AWS is not detecting my env variables.
-    AWS.config.update({accessKeyId:process.env.AWS_ACCESS_KEY, secretAccessKey:process.env.AWS_SECRET_ACCESS_KEY});
-    AWS.config.update({region:process.env.AWS_REGION});
-
+    AWS.config.update({accessKeyId: process.env.AWS_ACCESS_KEY, secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY});
+    AWS.config.update({region: process.env.AWS_REGION});
 
     /**
      * @param {[]} awsObjs
@@ -27,7 +39,7 @@ module.exports = (function() {
      * @returns {{}}
      * @private
      */
-    function condenseItems (awsObjs, definition) {
+    function condenseItems(awsObjs, definition) {
         return _.map(awsObjs, function (awsObj) {
             return condenseItem(awsObj, definition);
         });
@@ -38,15 +50,17 @@ module.exports = (function() {
      * @param {{}} definition
      * @returns {{}}
      */
-    function condenseItem (awsObj, definition) {
+    function condenseItem(awsObj, definition) {
         var obj = {};
         _.each(awsObj, function (value, key) {
             var x, defined = definition[key];
-            switch(defined && defined.type) {
+            switch (defined && defined.type) {
                 case 'string':
-                    obj[key] = (value.S || value.N).toString(); break;
+                    obj[key] = (value.S || value.N).toString();
+                    break;
                 case 'integer':
-                    obj[key] = parseInt(value.S || value.N); break;
+                    obj[key] = parseInt(value.S || value.N);
+                    break;
                 case 'datetime':
                     if (value.N) {
                         obj[key] = new Date(parseInt(value.N));
@@ -55,13 +69,231 @@ module.exports = (function() {
                     }
                     break;
                 case 'boolean':
-                    obj[key] = !!value.N || !!value.S; break;
+                    obj[key] = !!value.N || !!value.S;
+                    break;
                 default:
-                    console.error("Unhandled AWS DynamoDB type", key, value);
+                    //best effort
+                    obj[key] = parseFloat(value.N) || value.S
                     break;
             }
         });
         return obj;
+    }
+
+    function expandItem (item) {
+        var awsItem = {};
+        _.each(item, function (value, key) {
+            switch(typeof value) {
+                //string
+                case 'string': awsItem[key] = {'S': value.toString()}; break;
+                //number
+                case 'number': awsItem[key] = {'N': value.toString()}; break;
+                //datetime
+                case 'object':
+                    if (value instanceof Date) {
+                        awsItem[key] = {'N': value.getTime().toString()};
+                    } else {
+                        awsItem[key] = {'S': JSON.stringify(value)};
+                    }
+                    break;
+                default:
+                    console.error("Cannot handle type of " + value + " (" + (typeof value) + ")");
+            }
+        });
+        return awsItem;
+    }
+
+    function find(collection, options, cb) {
+        var hashKey = collection.hashKey,
+            params = {
+                TableName: collection.identity
+            };
+
+        // Options object is normalized for you:
+        //
+        // options.where
+        // options.limit
+        // options.skip
+        // options.sort
+
+        // Filter, paginate, and sort records from the datastore.
+        // You should end up w/ an array of objects as a result.
+        // If no matches were found, this will be an empty array.
+
+        if (options.where && options.where[hashKey] && !_.isObject(options.where[hashKey])) {
+            findOne(params, collection, options, cb);
+        } else {
+            findMany(params, collection, options, cb);
+        }
+    }
+
+    function findOne(params, collection, options, cb) {
+        var hashKey = collection.hashKey;
+        params.Key = {};
+        params.Key[hashKey] = {"S": options.where[hashKey].toString()};
+
+        dynamodb.getItem(params, function (err, data) {
+            var item;
+            if (data && data.Item) {
+                item = condenseItem(data.Item, collection.definition);
+            }
+            //must be array
+            cb(err, item && [item]);
+        });
+    }
+
+
+
+    function convertSymbolOpToAwsOp(op) {
+        switch(op) {
+            case '=': return 'EQ';
+            case '<': return 'LT';
+            case '<=': return 'LE';
+            case '>': return 'GT';
+            case '>=': return 'GE';
+            default: return op;
+        }
+    }
+
+    function findMany(params, collection, options, cb) {
+        var errors = [],
+            definition = collection.definition,
+            hashKey = definition.hashKey;
+
+        /**
+         * Key Conditions
+         *
+         * For a query on a table, you can only have conditions on the
+         * table primary key attributes.  The hash key must be an EQ
+         * condition, and optionally the range attribute.
+         *
+         * For a query on an index, you can only have conditions on the
+         * index key attributes.  The hash key must be an EQ condition,
+         * and optionally the range attribute.
+         */
+        _.each(options.where, function (value, key, list) {
+            var keyOp, preKeyOp,
+                keyDef = definition[key];
+            if (!keyDef) {
+                errors.push("Key " + key + " is not defined in schema.");
+            } else if (!_.isObject(value)) {
+                errors.push("Value " + value + "must be object.");
+            } else if ((keyDef.hashKey) && (value.EQ || value['='])) {
+                params.KeyConditions = params.KeyConditions || {};
+                params.KeyConditions[key] = expandItem({'EQ': (value.EQ || value['='])});
+            } else if (keyDef.rangeKey && _.isObject(value) && Object.keys(value).length === 1) {
+                preKeyOp = Object.keys(value)[0];
+                keyOp = convertSymbolOpToAwsOp(preKeyOp);
+                params.KeyConditions = params.KeyConditions || {};
+                params.KeyConditions[key] = {};
+                params.KeyConditions[key][keyOp] = value[preKeyOp];
+                params.KeyConditions[key] = expandItem(params.KeyConditions[key]);
+            } else {
+                errors.push("Key " + key + " is not an index.")
+            }
+        });
+
+        if (options.attributesToGet) {
+            params.AttributesToGet = options.attributesToGet;
+        }
+
+        if (options.limit) {
+            params.Limit = options.limit;
+        }
+
+        dynamodb.query(params, function (err, data) {
+            var items;
+            if (data && data.Items) {
+                items = data && condenseItems(data.Items, collection.definition);
+            }
+            cb(err, items);
+        });
+    }
+
+    function destroy(collection, options, cb) {
+        var hashKey = collection.hashKey;
+        if (options.where && options.where[hashKey] && !_.isObject(options.where[hashKey])) {
+            destroyOne(collection, options, cb);
+        } else {
+            destroyMany(collection, options, cb);
+        }
+    }
+
+    /**
+     * Destroy a single item by id
+     * @param collection
+     * @param options
+     * @param cb
+     */
+    function destroyOne(collection, options, cb) {
+        var params = {
+                TableName: collection.identity,
+                Key: {},
+                ReturnValues: "ALL_OLD"
+            },
+            hashKey = collection.hashKey;
+
+        params.Key[hashKey] = {"S": options.where[hashKey]};
+
+        dynamodb.deleteItem(params, function (err, data) {
+            cb(err, data);
+        });
+    }
+
+    function destroyMany(collection, options, cb) {
+        find(collection, options, function (err, items) {
+            if (err) {
+                cb(err, items);
+            } else {
+                var params = {
+                        RequestItems: {}
+                    },
+                    ops = [];
+
+                params.RequestItems[collection.identity] = ops;
+
+                _.each(items, function (item) {
+                    var key = {};
+                    key[collection.hashKey] = {"S": item[collection.hashKey]};
+                    ops.push({DeleteRequest: {Key: key }});
+                });
+
+                batchWriteItems(params, cb);
+            }
+        });
+
+    }
+
+    function batchWriteItems(params, cb) {
+        dynamodb.batchWriteItems(params, function (err, data) {
+            if (data) {
+                if (data.UnprocessedItems) {
+                    params.RequestItems = data.UnprocessedItems;
+                    batchWriteItems(params, cb);
+                } else {
+                    cb(err, data);
+                }
+            } else {
+                cb(err, data);
+            }
+        });
+    }
+
+    /**
+     * @param {{}} params
+     * @param {string} key
+     * @param {{}} value
+     * @param {"HASH"|"RANGE"} awsKeyType
+     */
+    function pushKeyDefinition(params, key, value, awsKeyType) {
+        params.AttributeDefinitions.push({
+            AttributeName: key,
+            AttributeType: getAWSType(value.type)
+        });
+        params.KeySchema.push({
+            AttributeName: key,
+            KeyType: awsKeyType
+        });
     }
 
     // Expose adapter definition
@@ -82,6 +314,10 @@ module.exports = (function() {
 
         setCollections: function (mock) {
             collections = mock;
+        },
+
+        setConfig: function (mock) {
+
         },
 
         /**
@@ -105,67 +341,44 @@ module.exports = (function() {
 
 
         /**
-         *
-         * REQUIRED method if integrating with a schemaful
-         * (SQL-ish) database.
-         *
-         * @param  {[type]}   collectionName [description]
-         * @param  {[type]}   definition     [description]
-         * @param  {Function} cb             [description]
-         * @return {[type]}                  [description]
+         * Creates a new table (since it didn't exist)
+         * @param  {string} collectionName
+         * @param  {{}} definition
+         * @param  {function} cb
          */
         define: function (collectionName, definition, cb) {
-            console.log("define", collectionName, definition, cb);
-            //create a new table with the definition
-
-            collections[collectionName].definition = definition;
-
-            function getType (type) {
-                switch(type) {
-                    case 'integer': return 'N';
-                    case 'string': return 'S';
-                    case 'datetime': return 'N';
-                    default: return 'S';
-                }
-            }
+            var collection = collections[collectionName],
+                config = collection.config || {};
+            collection.definition = definition;
 
             var params = {
                 TableName: collectionName,
                 AttributeDefinitions: [],
                 KeySchema: [],
                 ProvisionedThroughput: {
-                    ReadCapacityUnits: this.config.ReadCapacityUnits,
-                    WriteCapacityUnits: this.config.WriteCapacityUnits
+                    ReadCapacityUnits: config.ReadCapacityUnits,
+                    WriteCapacityUnits: config.WriteCapacityUnits
                 }
             };
 
             _.each(definition, function (value, key) {
-                if (value.primaryKey) {
-                    params.AttributeDefinitions.push({
-                        AttributeName: key,
-                        AttributeType: getType(value.type)
-                    });
-                    params.KeySchema.push({
-                        AttributeName: key,
-                        KeyType: "HASH"
-                    });
+                if (value.hashKey) {
+                    definition.hashKey = key;
+                    pushKeyDefinition(params, key, value, "HASH");
+                } else if (value.rangeKey) {
+                    definition.rangeKey = key;
+                    pushKeyDefinition(params, key, value, "RANGE");
                 }
             });
-            params.AttributeDefinitions.push({
-                AttributeName: "createdAt",
-                AttributeType: getType("datetime")
-            });
-            params.KeySchema.push({
-                AttributeName: "createdAt",
-                KeyType: "RANGE"
-            });
 
-            console.log("params", params);
-            dynamodb.createTable(params, function (err, data) {
-                collections[collectionName].creation = data;
-                console.log("define", err, data);
-                cb(err, data);
-            });
+            if (!definition.hashKey) {
+                cb(new Error("Must define hashKey."))
+            } else {
+                dynamodb.createTable(params, function (err, data) {
+                    collections[collectionName].creation = data;
+                    cb(err, data);
+                });
+            }
         },
 
         /**
@@ -174,7 +387,6 @@ module.exports = (function() {
          *
          * @param  {[type]}   collectionName [description]
          * @param  {Function} cb             [description]
-         * @return {[type]}                  [description]
          */
         describe: function (collectionName, cb) {
             console.log("describe", collectionName, cb);
@@ -233,103 +445,71 @@ module.exports = (function() {
          * @param  {Function} cb
          */
         find: function (collectionName, options, cb) {
-            var params = {
-                    TableName: collectionName
-                },
-                collection = collections[collectionName];
+            var collection = collections[collectionName];
 
-            if (!collection) { cb(new Error("Missing collection")) }
-            if (!collection.definition) { cb(new Error("Missing collection.definition")) }
-
-            // Options object is normalized for you:
-            //
-            // options.where
-            // options.limit
-            // options.skip
-            // options.sort
-
-            // Filter, paginate, and sort records from the datastore.
-            // You should end up w/ an array of objects as a result.
-            // If no matches were found, this will be an empty array.
-
-            if (options.limit === 1 && options.where.id) {
-                params.Key = {"id": {"N": options.where.id}};
-
-                dynamodb.getItem(params, function (err, data) {
-                    var item = data && data.Item &&
-                        condenseItem(data.Item, collection.definition);
-                    console.log("limit 1 found ", err || data);
-                    cb(err, item && [item]);
-                });
-            } else {
-
-
-                if (options.where) {
-                    params.IndexName = options.where.id;
-                }
-
-                if (options.limit) {
-                    params.Limit = options.limit;
-                }
-
-                dynamodb.scan(params, function (err, data) {
-                    var items = data && condenseItems(data.Items, collection.definition);
-                    cb(err, items);
-                });
+            if (!collection) {
+                cb(new Error("Missing collection"));
             }
+
+            if (!collection.definition) {
+                cb(new Error("Missing collection.definition"));
+            }
+
+            find(collection, options, cb);
         },
 
         /**
-         * Create a new object.
+         * Create a single new model (specified by `values`)
          * @param  {string} collectionName
          * @param  {{}} values
          * @param  {Function} cb
          */
         create: function (collectionName, values, cb) {
-            console.log('create', collectionName, values, cb);
-            // Create a single new model (specified by `values`)
             var item = {},
+                errors = [],
                 collection = collections[collectionName],
                 definition = collection.definition;
 
-            item.id = {"N": generateUid().toString()};
+            _.each(definition, function (valueDef, key) {
+                var value = values[key] || valueDef.defaultsTo;
 
-
-            _.each(values, function (value, key) {
-                switch(definition[key].type) {
-                    case 'string':
-                        item[key] = {'S': value.toString()};
-                        break;
-                    case 'integer':
-                        item[key] = {'N': value.toString()};
-                        break;
-                    case 'datetime':
-                        item[key] = {'N': value.getTime().toString()};
-                        break;
-                    default:
-                        console.error("Unhandled type", definition[key].type);
-                        break;
-                }
-            })
-            var params = {
-                    TableName: collectionName,
-                    Item: item,
-                    Expected: {
-                        id: { Exists: false}
+                if ((_.isUndefined(value) || _.isNull(value)) && valueDef.required) {
+                    errors.push("Missing value for required " + key + " type " + valueDef.type || valueDef);
+                } else {
+                    switch (valueDef.type || valueDef) {
+                        case 'string':
+                            item[key] = {'S': value && value.toString()};
+                            break;
+                        case 'integer':
+                            item[key] = {'N': value && value.toString()};
+                            break;
+                        case 'datetime':
+                            item[key] = {'N': value && value.getTime().toString()};
+                            break;
+                        default:
+                            errors.push("Unhandled type " + (valueDef.type || valueDef));
+                            break;
                     }
-                };
+                }
+            });
+
+            if (!_.isEmpty(errors)) {
+                return cb(new Error(errors));
+            }
+
+
+
+            var params = {
+                TableName: collectionName,
+                Item: item
+            };
             dynamodb.putItem(params, function (err, data) {
                 if (err && err.code == "ConditionalCheckFailedException") {
                     console.log("Found item with that id already.");
-                } else {
-
                 }
-                console.log("create", err, data);
                 cb(err, data);
             });
         },
-
-        //
 
         /**
          *
@@ -366,7 +546,7 @@ module.exports = (function() {
          * @param  {Function} cb             [description]
          */
         destroy: function (collectionName, options, cb) {
-            cb(new Error("Not supported yet.  Will be."));
+            destroy(collections[collectionName], options, cb);
         }
     };
 
