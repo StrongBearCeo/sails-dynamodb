@@ -16,7 +16,8 @@ collections[collectionName] = collection;
 var dynamodb = {
     batchWriteItems: function (params, cb) { cb(new Error("Must be stubbed")); },
     deleteItem: function (params, cb) { cb(new Error("Must be stubbed")); },
-    query: function (params, cb) { cb(new Error("Must be stubbed")); }
+    query: function (params, cb) { cb(new Error("Must be stubbed")); },
+    scan: function (params, cb) { cb(new Error("Must be stubbed")); }
 };
 
 
@@ -43,7 +44,7 @@ describe('destroy', function () {
         collection.definition = {};
 
         sandbox.mock(dynamodb).expects("deleteItem").never();
-        sandbox.mock(dynamodb).expects("query").once()
+        sandbox.mock(dynamodb).expects("scan").once()
             .withArgs({ TableName: collectionName })
             .callsArgWithAsync(1, null, {Items: [{uid: {"S": "1"}}, {uid: {"S": "2"}}]});
         sandbox.mock(dynamodb).expects("batchWriteItems").once()

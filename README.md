@@ -4,7 +4,21 @@ A sails adapter for interacting with Amazon's DynamoDB.
 
 Mostly unit tested (happy path only so far).
 
-Instead of setting a primaryKey, set a hashKey and optionally a rangeKey.
+Instead of setting a primaryKey, set a hashKey and optionally a rangeKey like so:
+
+    attributes: {
+
+       email: {
+         type: 'string',
+         email: true,
+         index: 'hash'
+       },
+
+       geoHash: {
+         type: 'string',
+         index: 'range'
+       }
+    }
 
 Will create table in database if it doesn't exist yet.
 

@@ -13,6 +13,7 @@ collections[collectionName] = collection;
 
 //fake of dynamodb
 var dynamodb = {
+    scan: function (params, cb) { cb(new Error("Must be stubbed")); },
     query: function (params, cb) { cb(new Error("Must be stubbed")); },
     getItem: function (params, cb) { cb(new Error("Must be stubbed")); }
 };
@@ -39,7 +40,7 @@ describe('find', function () {
     it('empty options should scan table for everything', function (done) {
         var options = {};
 
-        sandbox.mock(dynamodb).expects("query").once()
+        sandbox.mock(dynamodb).expects("scan").once()
             .withArgs({TableName: collectionName})
             .callsArgWithAsync(1, null, []);
 
@@ -51,8 +52,44 @@ describe('find', function () {
     it('where hashKey is set', function (done) {
         var options = {where: {uid: 1}};
 
-        sandbox.mock(dynamodb).expects("getItem").once()
-            .withArgs({Key: { uid: { S: "1" } }, TableName: collectionName})
+        sandbox.mock(dynamodb).expects("query").once()
+            .withArgs({
+                KeyConditions: { uid: { AttributeValueList: [{ N: "1" }], ComparisonOperator: "EQ" } },
+                TableName: "collectionName"
+            })
+            .callsArgWithAsync(1, null, []);
+
+        adapter.find(collectionName, options, function (err, data) {
+            done(err, data);
+        })
+    });
+
+    it('where hashKey is set by object', function (done) {
+        var options = {where: {uid: {'=': 1}}};
+
+        sandbox.mock(dynamodb).expects("query").once()
+            .withArgs({
+                KeyConditions: { uid: { AttributeValueList: [{ N: "1" }], ComparisonOperator: "EQ" } },
+                TableName: "collectionName"
+            })
+            .callsArgWithAsync(1, null, []);
+
+        adapter.find(collectionName, options, function (err, data) {
+            done(err, data);
+        })
+    });
+
+    it('where hashKey is set by object', function (done) {
+        var options = { where: {email: 'test@test.com'} };
+        collection.hashKey = "email";
+
+        sandbox.mock(dynamodb).expects("query").once()
+            .withArgs({
+                KeyConditions: {
+                    email: { AttributeValueList: [{ S: "test@test.com" }], ComparisonOperator: "EQ" }
+                },
+                TableName: "collectionName"
+            })
             .callsArgWithAsync(1, null, []);
 
         adapter.find(collectionName, options, function (err, data) {

@@ -1,10 +1,14 @@
+/*globals module*/
+
 var AWS = require('aws-sdk'),
-    _ = require('underscore');
+    _ = require('underscore'),
+    winston = require('winston');
+
+var log = log || winston.info || console.log;
 
 module.exports = (function () {
 
     var collections = {};
-    var _dbPools = {};
 
     var dynamodb = new AWS.DynamoDB();
 
@@ -22,10 +26,10 @@ module.exports = (function () {
     }
 
     //Tell me what environment variables exists
-    console.log("AWS environment variables available:")
+    log("AWS environment variables available:");
     _.each(process.env, function (item, key) {
         if (key.indexOf('AWS') > -1) {
-            console.log("\t", key, '\t', item);
+            log("\t", key, '\t', item);
         }
     });
 
@@ -80,27 +84,22 @@ module.exports = (function () {
         return obj;
     }
 
-    function expandItem (item) {
-        var awsItem = {};
-        _.each(item, function (value, key) {
-            switch(typeof value) {
-                //string
-                case 'string': awsItem[key] = {'S': value.toString()}; break;
-                //number
-                case 'number': awsItem[key] = {'N': value.toString()}; break;
-                //datetime
-                case 'object':
-                    if (value instanceof Date) {
-                        awsItem[key] = {'N': value.getTime().toString()};
-                    } else {
-                        awsItem[key] = {'S': JSON.stringify(value)};
-                    }
-                    break;
-                default:
-                    console.error("Cannot handle type of " + value + " (" + (typeof value) + ")");
-            }
-        });
-        return awsItem;
+    function expandItem (value) {
+        switch(typeof value) {
+            //string
+            case 'string': return {'S': value.toString()};
+            //number
+            case 'number': return {'N': value.toString()};
+            //datetime
+            case 'object':
+                if (value instanceof Date) {
+                    return {'N': value.getTime().toString()};
+                } else {
+                    return {'S': JSON.stringify(value)};
+                }
+            default:
+                return console.error("Cannot handle type of " + value + " (" + (typeof value) + ")");
+        }
     }
 
     function find(collection, options, cb) {
@@ -108,6 +107,7 @@ module.exports = (function () {
             params = {
                 TableName: collection.identity
             };
+        log("find", params, hashKey)
 
         // Options object is normalized for you:
         //
@@ -120,10 +120,12 @@ module.exports = (function () {
         // You should end up w/ an array of objects as a result.
         // If no matches were found, this will be an empty array.
 
-        if (options.where && options.where[hashKey] && !_.isObject(options.where[hashKey])) {
+        if (options.limit === 1) {
             findOne(params, collection, options, cb);
-        } else {
+        } else if (options.where && options.where[hashKey]) {
             findMany(params, collection, options, cb);
+        } else {
+            findAll(params, collection, options, cb);
         }
     }
 
@@ -158,7 +160,7 @@ module.exports = (function () {
     function findMany(params, collection, options, cb) {
         var errors = [],
             definition = collection.definition,
-            hashKey = definition.hashKey;
+            hashKey = collection.hashKey;
 
         /**
          * Key Conditions
@@ -172,22 +174,24 @@ module.exports = (function () {
          * and optionally the range attribute.
          */
         _.each(options.where, function (value, key, list) {
-            var keyOp, preKeyOp,
-                keyDef = definition[key];
-            if (!keyDef) {
-                errors.push("Key " + key + " is not defined in schema.");
-            } else if (!_.isObject(value)) {
-                errors.push("Value " + value + "must be object.");
-            } else if ((keyDef.hashKey) && (value.EQ || value['='])) {
+            var keyOp, preKeyOp;
+            if (!_.isObject(value) && (collection.hashKey == key || collection.rangeKey == key)) {
                 params.KeyConditions = params.KeyConditions || {};
-                params.KeyConditions[key] = expandItem({'EQ': (value.EQ || value['='])});
-            } else if (keyDef.rangeKey && _.isObject(value) && Object.keys(value).length === 1) {
+                params.KeyConditions[key] = {AttributeValueList: []};
+                params.KeyConditions[key].AttributeValueList.push(expandItem(value));
+                params.KeyConditions[key].ComparisonOperator = 'EQ';
+            } else if ((collection.hashKey == key) && (value.EQ || value['='])) {
+                params.KeyConditions = params.KeyConditions || {};
+                params.KeyConditions[key] = {AttributeValueList: []};
+                params.KeyConditions[key].AttributeValueList.push(expandItem((value.EQ || value['='])));
+                params.KeyConditions[key].ComparisonOperator = 'EQ';
+            } else if ((collection.rangeKey == key) && _.isObject(value) && Object.keys(value).length === 1) {
                 preKeyOp = Object.keys(value)[0];
                 keyOp = convertSymbolOpToAwsOp(preKeyOp);
                 params.KeyConditions = params.KeyConditions || {};
-                params.KeyConditions[key] = {};
-                params.KeyConditions[key][keyOp] = value[preKeyOp];
-                params.KeyConditions[key] = expandItem(params.KeyConditions[key]);
+                params.KeyConditions[key] = {AttributeValueList: []};
+                params.KeyConditions[key].AttributeValueList.push(expandItem((value.EQ || value['='])));
+                params.KeyConditions[key].ComparisonOperator = keyOp;
             } else {
                 errors.push("Key " + key + " is not an index.")
             }
@@ -201,8 +205,26 @@ module.exports = (function () {
             params.Limit = options.limit;
         }
 
+        log(params);
         dynamodb.query(params, function (err, data) {
             var items;
+            log(err, data);
+            if (data && data.Items) {
+                items = data && condenseItems(data.Items, collection.definition);
+            }
+            cb(err, items);
+        });
+    }
+
+    function findAll(params, collection, options, cb) {
+        log("findAll", params);
+        dynamodb.scan(params, function (err, data) {
+            log(err, data);
+            var items;
+            if (err && err.code === "ResourceNotFoundException") {
+                err = null;
+                items = [];
+            }
             if (data && data.Items) {
                 items = data && condenseItems(data.Items, collection.definition);
             }
@@ -298,12 +320,11 @@ module.exports = (function () {
 
     // Expose adapter definition
     return {
-        syncable: true, // to track schema internally
+        identity: "dynamodb",
+
+        syncable: true,
 
         defaults: {
-            schema: true,
-            nativeParser: false,
-            safe: true,
             ReadCapacityUnits: 100,
             WriteCapacityUnits: 10
         },
@@ -316,18 +337,15 @@ module.exports = (function () {
             collections = mock;
         },
 
-        setConfig: function (mock) {
-
-        },
-
         /**
-         * Save a collection (table) locally so we can save information about it
+         * Save a collection (table) locally so we can save.logrmation about it
          * @param  {{identity:string}} collection
          * @param  {Function} cb callback
          */
         registerCollection: function (collection, cb) {
+            log("registerCollection", collection);
             collections[collection.identity] = collection;
-            cb();
+            return cb();
         },
 
         /**
@@ -336,6 +354,7 @@ module.exports = (function () {
          * etc.
          */
         teardown: function (cb) {
+            log("teardown");
             cb(new Error("Not supported on purpose. Use AWS Management Console instead."));
         },
 
@@ -347,6 +366,8 @@ module.exports = (function () {
          * @param  {function} cb
          */
         define: function (collectionName, definition, cb) {
+            log("define", collectionName, definition);
+
             var collection = collections[collectionName],
                 config = collection.config || {};
             collection.definition = definition;
@@ -362,10 +383,10 @@ module.exports = (function () {
             };
 
             _.each(definition, function (value, key) {
-                if (value.hashKey) {
+                if (value.index === "hash") {
                     definition.hashKey = key;
                     pushKeyDefinition(params, key, value, "HASH");
-                } else if (value.rangeKey) {
+                } else if (value.index === "range") {
                     definition.rangeKey = key;
                     pushKeyDefinition(params, key, value, "RANGE");
                 }
@@ -389,8 +410,14 @@ module.exports = (function () {
          * @param  {Function} cb             [description]
          */
         describe: function (collectionName, cb) {
-            console.log("describe", collectionName, cb);
-            var attributes = collections[collectionName];
+            log("describe", collectionName);
+            var attributes = collections[collectionName],
+                tableStatus = {
+                    "ACTIVE": true,
+                    "CREATING": false,
+                    "UPDATING": false,
+                    "DELETING": false
+                };
 
             //We should ask if the table exists
 
@@ -403,14 +430,51 @@ module.exports = (function () {
                     //ignore this error, since we're just checking if it exists
                     err = null;
                 }
+
                 if (data) {
-                    collections[collectionName].serverDescription = data;
+                    var table = data.Table;
+
+                    var collection = collections[collectionName];
+                    collection.serverDescription = data;
+
+                    if (data.Table) {
+                        log("\nTableName:", table.TableName);
+                        log("AttributeDefinitions:", table.AttributeDefinitions);
+                        log("KeySchema:", table.KeySchema);
+                        log("TableStatus:", table.TableStatus);
+                        log("ItemCount:", table.ItemCount);
+                        log("Misc:", JSON.stringify(
+                            _.omit(table, ['ItemCount','TableStatus','KeySchema', 'AttributeDefinitions', 'TableName'])
+                        ));
+
+                        var name = table.TableName,
+                            status = table.TableStatus;
+
+                        if (status) {
+                            if (!tableStatus[status]) {
+                                err = "Cannot continue, " + name + " table is " + status;
+                            }
+                        }
+
+                        if (table.KeySchema) {
+                            _.each(table.KeySchema, function (item) {
+                                switch(item.KeyType) {
+                                    case "HASH": collection.hashKey = item.AttributeName; break;
+                                    case "RANGE": collection.rangeKey = item.AttributeName; break;
+                                }
+                            })
+                        }
+                    } else {
+                        console.error("Missing table in response.");
+                    }
                 }
-                console.log("describe results", err, data);
+
+                //returning empty for both means we should create a table next
+                //returning an error stops the server start up
+                //returning data means the table already exists
                 cb(err, data);
             });
         },
-
 
         /**
          *
@@ -421,10 +485,17 @@ module.exports = (function () {
          * @param  {[type]}   collectionName [description]
          * @param  {[type]}   relations      [description]
          * @param  {Function} cb             [description]
-         * @return {[type]}                  [description]
          */
         drop: function (collectionName, relations, cb) {
-            cb(new Error("Not supported on purpose. Use AWS Management Console instead."));
+            log("drop", collectionName, relations);
+            var params = {
+                TableName: collectionName
+            };
+
+            dynamodb.deleteTable(params, function (err, data) {
+                log("drop", err, data);
+                cb(err, data);
+            });
         },
 
 
@@ -445,6 +516,7 @@ module.exports = (function () {
          * @param  {Function} cb
          */
         find: function (collectionName, options, cb) {
+            log("find", collectionName, options);
             var collection = collections[collectionName];
 
             if (!collection) {
@@ -465,13 +537,17 @@ module.exports = (function () {
          * @param  {Function} cb
          */
         create: function (collectionName, values, cb) {
+            log("create", collectionName, values);
             var item = {},
                 errors = [],
                 collection = collections[collectionName],
                 definition = collection.definition;
 
             _.each(definition, function (valueDef, key) {
+
                 var value = values[key] || valueDef.defaultsTo;
+
+                log(values, valueDef, key, value);
 
                 if ((_.isUndefined(value) || _.isNull(value)) && valueDef.required) {
                     errors.push("Missing value for required " + key + " type " + valueDef.type || valueDef);
@@ -494,7 +570,7 @@ module.exports = (function () {
             });
 
             if (!_.isEmpty(errors)) {
-                return cb(new Error(errors));
+                return cb(errors);
             }
 
 
@@ -505,10 +581,25 @@ module.exports = (function () {
             };
             dynamodb.putItem(params, function (err, data) {
                 if (err && err.code == "ConditionalCheckFailedException") {
-                    console.log("Found item with that id already.");
+                    log("Found item with that id already.");
                 }
                 cb(err, data);
             });
+        },
+
+        createEach: function (collectionName, cb) {
+            log("createEach", collectionName, cb);
+            cb();
+        },
+
+        findOrCreate: function (collectionName, cb) {
+            log("findOrCreate", collectionName, cb);
+            cb();
+        },
+
+        findOrCreateEach: function (collectionName, cb) {
+            log("findOrCreate", collectionName, cb);
+            cb();
         },
 
         /**
@@ -522,6 +613,7 @@ module.exports = (function () {
          * @param  {Function} cb             [description]
          */
         update: function (collectionName, options, values, cb) {
+            log("update", collectionName, options, values);
 
             // If you need to access your private data for this collection:
             var collection = collections[collectionName];
@@ -546,6 +638,7 @@ module.exports = (function () {
          * @param  {Function} cb             [description]
          */
         destroy: function (collectionName, options, cb) {
+            log("destroy", collectionName, options);
             destroy(collections[collectionName], options, cb);
         }
     };

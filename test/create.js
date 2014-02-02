@@ -104,7 +104,7 @@ describe('create', function () {
             .callsArgWithAsync(1, null, []);
 
         adapter.create(collectionName, values, function (err, data) {
-            err.should.contain.instanceof(Error);
+            should.exist(err);
             should.not.exist(data);
             done();
         })

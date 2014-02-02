@@ -43,7 +43,7 @@ describe('define', function () {
         var definition = {
             simpleString: "string",
             complexString: {
-                hashKey: true,
+                index: "hash",
                 type: "string"
             }
         };
@@ -67,11 +67,11 @@ describe('define', function () {
         var definition = {
             simpleString: "string",
             complexHashString: {
-                hashKey: true,
+                index: "hash",
                 type: "string"
             },
             complexRangeString: {
-                rangeKey: true,
+                index: "range",
                 type: "string"
             }
         };
@@ -101,11 +101,11 @@ describe('define', function () {
         var definition = {
             simpleString: "string",
             complexHashInteger: {
-                hashKey: true,
+                index: "hash",
                 type: "integer"
             },
             complexRangeDatetime: {
-                rangeKey: true,
+                index: "range",
                 type: "datetime"
             }
         };
