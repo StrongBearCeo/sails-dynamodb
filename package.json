@@ -6,7 +6,8 @@
   "author": "Dane Stuckel",
   "dependencies": {
     "aws-sdk": "~2.0.0-rc8",
-    "underscore": "~1.5.2"
+    "underscore": "~1.5.2",
+    "winston": "~0.7.2"
   },
   "devDependencies": {
     "mocha": "~1.17.1",
