@@ -343,7 +343,7 @@ module.exports = (function () {
          * @param  {Function} cb callback
          */
         registerCollection: function (collection, cb) {
-            log("registerCollection", collection);
+            log("registerCollection");
             collections[collection.identity] = collection;
             return cb();
         },
